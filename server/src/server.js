@@ -313,6 +313,24 @@ export function createApp() {
   app.use(cors())
   app.use(express.json())
 
+  app.get('/api/health/db', async (_request, response) => {
+    try {
+      const tables = await all('SHOW TABLES')
+      const recipeCount = await get('SELECT COUNT(*) AS recipeCount FROM recipes')
+
+      response.json({
+        ok: true,
+        recipeCount: recipeCount.recipeCount,
+        tables: tables.map((row) => Object.values(row)[0]),
+      })
+    } catch (error) {
+      response.status(500).json({
+        ok: false,
+        message: error.message,
+      })
+    }
+  })
+
   app.get('/api/meta', async (_request, response) => {
     try {
       const [categories, cuisines] = await Promise.all([
