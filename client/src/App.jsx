@@ -68,6 +68,24 @@ const normalizeQuantity = (value) => {
   return Number(next.toFixed(2))
 }
 
+const formatDisplayText = (value) => {
+  const source = String(value || '').trim()
+  if (!source) {
+    return ''
+  }
+
+  const spaced = source
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+
+  return spaced.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+const formatReviewCountLabel = (count) => `${count} review${count === 1 ? '' : 's'}`
+const formatUsDate = (value) => new Date(value).toLocaleDateString('en-US')
+const formatUsDateTime = (value) => new Date(value).toLocaleString('en-US')
+
 function App() {
   const [user, setUser] = useState(() => {
     return getStoredUser()
@@ -116,6 +134,7 @@ function App() {
   const [settingsForm, setSettingsForm] = useState(initialSettingsForm)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [landingPreview, setLandingPreview] = useState({ count: 12, recipes: [] })
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   const deferredDiscoverSearch = useDeferredValue(discoverFilters.search)
   const deferredSavedSearch = useDeferredValue(myRecipeFilters.search)
@@ -413,9 +432,13 @@ function App() {
     try {
       await api(`/api/recipes/${recipeId}/save`, { method: 'POST' }, user.id)
       setMessage('Recipe saved to My Recipes.')
+      setDiscoverRecipes((current) =>
+        current.map((recipe) =>
+          recipe.id === recipeId ? { ...recipe, saved: true } : recipe,
+        ),
+      )
       if (recipeDetail?.id === recipeId) {
         setRecipeDetail({ ...recipeDetail, saved: true })
-        setRoute({ page: 'saved-detail', id: recipeId })
       }
       const data = await api('/api/my-recipes?search=&category=All&cuisine=All&favorites=false', {}, user.id)
       setSavedRecipes(data)
@@ -432,10 +455,19 @@ function App() {
     try {
       await api(`/api/recipes/${recipeId}/save`, { method: 'DELETE' }, user.id)
       setMessage('Recipe removed from your collection.')
+      setDiscoverRecipes((current) =>
+        current.map((recipe) =>
+          recipe.id === recipeId ? { ...recipe, saved: false, favorite: false } : recipe,
+        ),
+      )
       const data = await api('/api/my-recipes?search=&category=All&cuisine=All&favorites=false', {}, user.id)
       setSavedRecipes(data)
       if (recipeDetail?.id === recipeId) {
-        setRoute({ page: 'my-recipes' })
+        if (route.page === 'saved-detail') {
+          setRoute({ page: 'my-recipes' })
+        } else {
+          setRecipeDetail({ ...recipeDetail, saved: false, favorite: false })
+        }
       }
     } catch (error) {
       setMessage(error.message)
@@ -491,6 +523,38 @@ function App() {
         user.id,
       )
       setMessage('Notes saved.')
+    } catch (error) {
+      setMessage(error.message)
+    }
+  }
+
+  const handleSaveReview = async () => {
+    if (!user || !recipeDetail) {
+      return
+    }
+
+    const rating = Number(recipeDetail.currentUserReview?.rating || 0)
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      setMessage('Choose a rating from 1 to 5 stars.')
+      return
+    }
+
+    try {
+      await api(
+        `/api/recipes/${recipeDetail.id}/review`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            rating,
+            review: recipeDetail.currentUserReview?.review || '',
+          }),
+        },
+        user,
+      )
+
+      const refreshed = await api(`/api/recipes/${recipeDetail.id}`, {}, user)
+      setRecipeDetail((current) => ({ ...refreshed, source: current?.source || 'discover' }))
+      setMessage('Review saved.')
     } catch (error) {
       setMessage(error.message)
     }
@@ -692,15 +756,15 @@ function App() {
   }
 
   const pageTitle = {
-    discover: 'Discover recipes worth saving',
-    'my-recipes': 'Your saved collection',
-    builder: 'Build a grocery list from saved recipes',
-    'my-lists': 'Open and manage your grocery lists',
-    'recipe-detail': 'Recipe details',
-    'saved-detail': 'Saved recipe details',
-    'list-detail': 'Grocery list detail',
-    profile: 'Your PantryPal profile',
-    settings: 'App settings and defaults',
+    discover: 'Discover Recipes',
+    'my-recipes': 'Your Saved Collection',
+    builder: 'Build a Grocery List',
+    'my-lists': 'Manage Your Grocery Lists',
+    'recipe-detail': 'Recipe dDtails',
+    'saved-detail': 'Saved Recipe Details',
+    'list-detail': 'Grocery List Detail',
+    profile: 'Your PantryPal Profile',
+    settings: 'App Settings and Defaults',
   }[route.page]
 
   return (
@@ -719,28 +783,63 @@ function App() {
           landingPreview={landingPreview}
         />
       ) : (
-        <main className="dashboard">
-          <aside className="sidebar">
-            <div className="sidebar-brand">
-              <div className="brand-badge">PP</div>
-              <div>
-                <p className="eyebrow">Smart planning</p>
-                <h1>PantryPal</h1>
+        <main className={sidebarCollapsed ? 'dashboard sidebar-collapsed' : 'dashboard'}>
+          <aside className={sidebarCollapsed ? 'sidebar collapsed' : 'sidebar'}>
+            <div className="sidebar-top-row">
+              <div className="sidebar-brand">
+                <div className="brand-badge">PP</div>
+                {sidebarCollapsed ? (
+                  <div className="sidebar-brand-copy collapsed-copy">
+                    <p className="eyebrow">Smart planning</p>
+                    <button
+                      type="button"
+                      className="sidebar-toggle"
+                      onClick={() => setSidebarCollapsed((current) => !current)}
+                      aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                      title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                    >
+                      <span />
+                      <span />
+                      <span />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="sidebar-brand-copy">
+                    <h1>PantryPal</h1>
+                    <div className="sidebar-brand-subrow">
+                      <p className="eyebrow">Smart planning</p>
+                      <button
+                        type="button"
+                        className="sidebar-toggle"
+                        onClick={() => setSidebarCollapsed((current) => !current)}
+                        aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                        title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                      >
+                        <span />
+                        <span />
+                        <span />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
-            <nav className="sidebar-nav">
-              {navItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={route.page === item.key ? 'nav-link active' : 'nav-link'}
-                  onClick={() => setRoute({ page: item.key })}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </nav>
+            {!sidebarCollapsed ? (
+              <nav className="sidebar-nav">
+                {navItems.map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    className={route.page === item.key ? 'nav-link active' : 'nav-link'}
+                    onClick={() => setRoute({ page: item.key })}
+                    title={item.label}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </nav>
+            ) : null}
           </aside>
 
           <section className="content">
@@ -807,18 +906,19 @@ function App() {
             </header>
 
             {route.page === 'discover' && (
-              <DiscoverView
-                filters={discoverFilters}
-                setFilters={(updater) => {
-                  setDiscoverLoading(true)
-                  setDiscoverFilters(updater)
-                }}
-                recipes={discoverRecipes}
-                loading={discoverLoading}
-                meta={meta}
-                onOpenRecipe={openRecipe}
-                onSaveRecipe={handleSaveRecipe}
-              />
+            <DiscoverView
+              filters={discoverFilters}
+              setFilters={(updater) => {
+                setDiscoverLoading(true)
+                setDiscoverFilters(updater)
+              }}
+              recipes={discoverRecipes}
+              loading={discoverLoading}
+              meta={meta}
+              onOpenRecipe={openRecipe}
+              onSaveRecipe={handleSaveRecipe}
+              onRemoveRecipe={handleRemoveRecipe}
+            />
             )}
 
             {route.page === 'recipe-detail' && (
@@ -828,6 +928,26 @@ function App() {
                 activeTab={activeTab}
                 onTabChange={setActiveTab}
                 onSaveRecipe={handleSaveRecipe}
+                onRemoveRecipe={handleRemoveRecipe}
+                onReviewChange={(review) =>
+                  setRecipeDetail((current) => ({
+                    ...current,
+                    currentUserReview: {
+                      rating: current?.currentUserReview?.rating || 0,
+                      review,
+                    },
+                  }))
+                }
+                onRatingChange={(rating) =>
+                  setRecipeDetail((current) => ({
+                    ...current,
+                    currentUserReview: {
+                      rating,
+                      review: current?.currentUserReview?.review || '',
+                    },
+                  }))
+                }
+                onSaveReview={handleSaveReview}
                 onBack={() => setRoute({ page: 'discover' })}
               />
             )}
@@ -859,6 +979,25 @@ function App() {
                 onToggleFavorite={handleFavoriteToggle}
                 onSaveNote={handleSaveNote}
                 onNoteChange={(note) => setRecipeDetail((current) => ({ ...current, note }))}
+                onReviewChange={(review) =>
+                  setRecipeDetail((current) => ({
+                    ...current,
+                    currentUserReview: {
+                      rating: current?.currentUserReview?.rating || 0,
+                      review,
+                    },
+                  }))
+                }
+                onRatingChange={(rating) =>
+                  setRecipeDetail((current) => ({
+                    ...current,
+                    currentUserReview: {
+                      rating,
+                      review: current?.currentUserReview?.review || '',
+                    },
+                  }))
+                }
+                onSaveReview={handleSaveReview}
                 onAddToBuilder={() => {
                   setBuilderSelections((current) =>
                     current.map((item) =>
@@ -1115,7 +1254,16 @@ function PublicShell({
   )
 }
 
-function DiscoverView({ filters, setFilters, recipes, loading, meta, onOpenRecipe, onSaveRecipe }) {
+function DiscoverView({
+  filters,
+  setFilters,
+  recipes,
+  loading,
+  meta,
+  onOpenRecipe,
+  onSaveRecipe,
+  onRemoveRecipe,
+}) {
   return (
     <section className="panel">
       <Toolbar
@@ -1137,10 +1285,9 @@ function DiscoverView({ filters, setFilters, recipes, loading, meta, onOpenRecip
             key={recipe.id}
             recipe={recipe}
             primaryLabel="View"
-            secondaryLabel={recipe.saved ? 'Saved' : 'Save'}
+            secondaryLabel={recipe.saved ? 'Unsave' : 'Save'}
             onPrimary={() => onOpenRecipe(recipe.id)}
-            onSecondary={() => !recipe.saved && onSaveRecipe(recipe.id)}
-            disableSecondary={recipe.saved}
+            onSecondary={() => (recipe.saved ? onRemoveRecipe(recipe.id) : onSaveRecipe(recipe.id))}
           />
         ))}
       </div>
@@ -1148,7 +1295,18 @@ function DiscoverView({ filters, setFilters, recipes, loading, meta, onOpenRecip
   )
 }
 
-function RecipeDetailView({ recipe, loading, activeTab, onTabChange, onSaveRecipe, onBack }) {
+function RecipeDetailView({
+  recipe,
+  loading,
+  activeTab,
+  onTabChange,
+  onSaveRecipe,
+  onRemoveRecipe,
+  onRatingChange,
+  onReviewChange,
+  onSaveReview,
+  onBack,
+}) {
   if (loading || !recipe) {
     return <section className="panel"><p className="loading-text">Loading recipe details…</p></section>
   }
@@ -1162,21 +1320,37 @@ function RecipeDetailView({ recipe, loading, activeTab, onTabChange, onSaveRecip
         <img src={recipe.imageUrl} alt={recipe.name} className="detail-image" />
         <div className="detail-card">
           <div className="tag-row">
-            <span className="tag">{recipe.cuisine}</span>
-            <span className="tag">{recipe.category}</span>
-            {recipe.averageRating ? <span className="tag">Rating {recipe.averageRating}</span> : null}
+            <span className="tag">{formatDisplayText(recipe.cuisine)}</span>
+            <span className="tag">{formatDisplayText(recipe.category)}</span>
+            <span className="tag">
+              {recipe.averageRating ? `${recipe.averageRating}/5` : 'No Ratings Yet'}
+            </span>
+            <span className="tag">{formatReviewCountLabel(recipe.reviewCount || 0)}</span>
           </div>
-          <h3>{recipe.name}</h3>
-          <p>{recipe.description}</p>
-          <button type="button" className="primary-button" onClick={() => onSaveRecipe(recipe.id)}>
-            Save to My Recipes
+          <h3>{formatDisplayText(recipe.name)}</h3>
+          <button
+            type="button"
+            className={recipe.saved ? 'unsave-button' : 'primary-button'}
+            data-save-state={recipe.saved ? 'saved' : 'unsaved'}
+            onClick={() => (recipe.saved ? onRemoveRecipe(recipe.id) : onSaveRecipe(recipe.id))}
+          >
+            {recipe.saved ? 'Unsave' : 'Save to My Recipes'}
           </button>
           <TabButtons activeTab={activeTab} onTabChange={onTabChange} />
           {activeTab === 'ingredients' ? (
             <IngredientList ingredients={recipe.ingredients} />
-          ) : (
+          ) : null}
+          {activeTab === 'instructions' ? (
             <InstructionList instructions={recipe.instructions} />
-          )}
+          ) : null}
+          {activeTab === 'reviews' ? (
+            <ReviewPanel
+              recipe={recipe}
+              onRatingChange={onRatingChange}
+              onReviewChange={onReviewChange}
+              onSaveReview={onSaveReview}
+            />
+          ) : null}
         </div>
       </div>
     </section>
@@ -1245,6 +1419,9 @@ function SavedRecipeDetailView({
   onToggleFavorite,
   onSaveNote,
   onNoteChange,
+  onRatingChange,
+  onReviewChange,
+  onSaveReview,
   onAddToBuilder,
 }) {
   if (loading || !recipe) {
@@ -1262,11 +1439,14 @@ function SavedRecipeDetailView({
           <div className="detail-card">
             <div className="tag-row">
               <span className="tag saved">Saved</span>
-              <span className="tag">{recipe.cuisine}</span>
-              <span className="tag">{recipe.category}</span>
+              <span className="tag">{formatDisplayText(recipe.cuisine)}</span>
+              <span className="tag">{formatDisplayText(recipe.category)}</span>
+              <span className="tag">
+                {recipe.averageRating ? `${recipe.averageRating}/5` : 'No Ratings Yet'}
+              </span>
+              <span className="tag">{formatReviewCountLabel(recipe.reviewCount || 0)}</span>
             </div>
-            <h3>{recipe.name}</h3>
-            <p>{recipe.description}</p>
+            <h3>{formatDisplayText(recipe.name)}</h3>
             <div className="stacked-actions">
               <button type="button" className="primary-button" onClick={onAddToBuilder}>
                 Add to Grocery List
@@ -1279,15 +1459,24 @@ function SavedRecipeDetailView({
                 className={recipe.favorite ? 'filter-pill active' : 'filter-pill'}
                 onClick={() => onToggleFavorite(recipe.id, !recipe.favorite)}
               >
-                {recipe.favorite ? 'Favorite recipe' : 'Mark as favorite'}
+                {recipe.favorite ? 'Favorited' : 'Mark as favorite'}
               </button>
             </div>
             <TabButtons activeTab={activeTab} onTabChange={onTabChange} />
             {activeTab === 'ingredients' ? (
               <IngredientList ingredients={recipe.ingredients} />
-            ) : (
+            ) : null}
+            {activeTab === 'instructions' ? (
               <InstructionList instructions={recipe.instructions} />
-            )}
+            ) : null}
+            {activeTab === 'reviews' ? (
+              <ReviewPanel
+                recipe={recipe}
+                onRatingChange={onRatingChange}
+                onReviewChange={onReviewChange}
+                onSaveReview={onSaveReview}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -1445,7 +1634,7 @@ function MyListsView({ lists, loading, search, setSearch, onOpenList, onCreateNe
             </div>
             <div className="list-meta">
               <span>{list.itemCount} items</span>
-              <span> Updated {new Date(list.updatedAt).toLocaleDateString()}</span>
+              <span> Updated {formatUsDate(list.updatedAt)}</span>
             </div>
             <div className="list-actions">
               <button type="button" className="secondary-button" onClick={() => onOpenList(list.id)}>
@@ -1504,7 +1693,7 @@ function ListDetailView({
         </div>
 
         <div className="header-actions-card">
-          <span>Last updated {new Date(list.updatedAt).toLocaleString()}</span>
+          <span>Last updated {formatUsDateTime(list.updatedAt)}</span>
           <button type="button" className="primary-button" onClick={onExport}>
             Export
           </button>
@@ -1741,18 +1930,21 @@ function RecipeCard({
       <img src={recipe.imageUrl} alt={recipe.name} />
       <div className="recipe-card-body">
         <div className="card-meta">
-          <span>{recipe.cuisine}</span>
-          <span>{recipe.category}</span>
+          <div className="card-meta-copy">
+            <span>{formatDisplayText(recipe.cuisine)}</span>
+            <span>{formatDisplayText(recipe.category)}</span>
+          </div>
+          {recipe.averageRating ? <span className="card-rating">{recipe.averageRating} / 5 ★</span> : null}
         </div>
-        <h3>{recipe.name}</h3>
-        <p>{recipe.description}</p>
+        <h3>{formatDisplayText(recipe.name)}</h3>
         <div className="recipe-actions">
           <button type="button" className="secondary-button" onClick={onPrimary}>
             {primaryLabel}
           </button>
           <button
             type="button"
-            className={saved ? 'danger-button subtle' : 'primary-button'}
+            className={saved ? 'unsave-button' : 'primary-button'}
+            data-save-state={saved ? 'saved' : 'unsaved'}
             onClick={onSecondary}
             disabled={disableSecondary}
           >
@@ -1814,6 +2006,77 @@ function TabButtons({ activeTab, onTabChange }) {
       >
         Instructions
       </button>
+      <button
+        type="button"
+        className={activeTab === 'reviews' ? 'tab-button active' : 'tab-button'}
+        onClick={() => onTabChange('reviews')}
+      >
+        Reviews
+      </button>
+    </div>
+  )
+}
+
+function StarRatingInput({ value, onChange }) {
+  return (
+    <div className="star-rating-input" role="radiogroup" aria-label="Recipe rating">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
+          key={star}
+          type="button"
+          className={star <= value ? 'star-select active' : 'star-select'}
+          onClick={() => onChange(star)}
+          aria-label={`Rate ${star} star${star === 1 ? '' : 's'}`}
+        >
+          ★
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ReviewPanel({ recipe, onRatingChange, onReviewChange, onSaveReview }) {
+  return (
+    <div className="review-panel">
+      <div className="review-summary">
+        <div>
+          <p className="eyebrow">Community Rating</p>
+          <h4>{recipe.averageRating ? `${recipe.averageRating} / 5` : 'No ratings yet'}</h4>
+          <p>{recipe.reviewCount || 0} total reviews</p>
+        </div>
+        <div className="review-form-card">
+          <strong>Your rating</strong>
+          <StarRatingInput
+            value={recipe.currentUserReview?.rating || 0}
+            onChange={onRatingChange}
+          />
+          <textarea
+            value={recipe.currentUserReview?.review || ''}
+            onChange={(event) => onReviewChange(event.target.value)}
+            placeholder="Share what you liked, changed, or would cook differently next time."
+          />
+          <button type="button" className="primary-button" onClick={onSaveReview}>
+            Save Review
+          </button>
+        </div>
+      </div>
+
+      <div className="review-list">
+        {recipe.reviews?.length ? (
+          recipe.reviews.map((entry) => (
+            <article key={entry.id} className="review-card">
+              <div className="review-card-header">
+                <strong>{entry.userName}{entry.mine ? ' (You)' : ''}</strong>
+                <span>{'★'.repeat(entry.rating)}{'☆'.repeat(5 - entry.rating)}</span>
+              </div>
+              <p className="review-date">{formatUsDate(entry.createdAt)}</p>
+              <p>{entry.review || 'Rated this recipe without a written review.'}</p>
+            </article>
+          ))
+        ) : (
+          <p className="loading-text">Be the first to rate this recipe.</p>
+        )}
+      </div>
     </div>
   )
 }
@@ -1826,8 +2089,8 @@ function PreviewRecipe({ title, meta, imageUrl }) {
   return (
     <div className="mini-card">
       <div className="mini-image" style={imageUrl ? { backgroundImage: `url(${imageUrl})` } : undefined} />
-      <strong>{title}</strong>
-      <span>{meta}</span>
+      <strong>{formatDisplayText(title)}</strong>
+      <span>{formatDisplayText(meta)}</span>
     </div>
   )
 }
