@@ -1,12 +1,28 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const api = async (path, options = {}, userId = 1) => {
+const getStoredUser = () => {
+  const stored = window.localStorage.getItem('pantrypal-user')
+  if (!stored) {
+    return null
+  }
+
+  try {
+    const user = JSON.parse(stored)
+    return user?.token ? user : null
+  } catch {
+    return null
+  }
+}
+
+const api = async (path, options = {}, authUser = null) => {
+  const token = authUser?.token || getStoredUser()?.token
+
   const response = await fetch(path, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
-      'x-user-id': String(userId),
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {}),
     },
   })
@@ -50,8 +66,7 @@ const normalizeQuantity = (value) => {
 
 function App() {
   const [user, setUser] = useState(() => {
-    const stored = window.localStorage.getItem('pantrypal-user')
-    return stored ? JSON.parse(stored) : null
+    return getStoredUser()
   })
   const [route, setRoute] = useState(user ? { page: 'discover' } : { page: 'landing' })
   const [meta, setMeta] = useState({ categories: ['All'], cuisines: ['All'] })
@@ -612,7 +627,7 @@ function App() {
         includeNotes: String(includeNotes),
       })
       const response = await fetch(`/api/grocery-lists/${route.id}/export?${query.toString()}`, {
-        headers: { 'x-user-id': String(user.id) },
+        headers: { Authorization: `Bearer ${user.token}` },
       })
       if (!response.ok) {
         throw new Error('Could not export the list.')
