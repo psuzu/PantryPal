@@ -2,6 +2,14 @@ import cors from 'cors'
 import express from 'express'
 import { fileURLToPath } from 'node:url'
 
+import {
+  buildAuthResponse,
+  hashPassword,
+  isPasswordHash,
+  validatePassword,
+  verifyAuthToken,
+  verifyPassword,
+} from './auth.js'
 import { all, get, initializeDatabase, run } from './db.js'
 import {
   extractIngredients,
@@ -15,9 +23,65 @@ import {
 
 const PORT = process.env.PORT || 3001
 const currentFile = fileURLToPath(import.meta.url)
+const publicApiPaths = new Set([
+  '/auth/login',
+  '/auth/signup',
+  '/health',
+  '/health/db',
+  '/landing-recipes',
+  '/meta',
+])
 
 function parseUserId(request) {
-  return Number(request.header('x-user-id') || request.query.userId || 1)
+  return request.user.id
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase()
+}
+
+function normalizeName(name) {
+  return String(name || '').trim()
+}
+
+function getBearerToken(request) {
+  const authorization = request.header('authorization') || ''
+  if (!authorization.startsWith('Bearer ')) {
+    return null
+  }
+
+  return authorization.slice('Bearer '.length).trim()
+}
+
+async function authenticateApiRequest(request, response, next) {
+  if (request.method === 'OPTIONS' || publicApiPaths.has(request.path)) {
+    next()
+    return
+  }
+
+  const token = getBearerToken(request)
+  if (!token) {
+    response.status(401).json({ message: 'Authentication required.' })
+    return
+  }
+
+  try {
+    const authUser = verifyAuthToken(token)
+    const user = await get(
+      'SELECT id, name, email FROM users WHERE id = ?',
+      [authUser.id],
+    )
+
+    if (!user) {
+      response.status(401).json({ message: 'Authentication required.' })
+      return
+    }
+
+    request.user = user
+    next()
+  } catch (_error) {
+    response.status(401).json({ message: 'Authentication required.' })
+  }
 }
 
 async function getSavedMaps(userId) {
@@ -312,6 +376,7 @@ export function createApp() {
 
   app.use(cors())
   app.use(express.json())
+  app.use('/api', authenticateApiRequest)
 
   app.get('/api/health/db', async (_request, response) => {
     try {
@@ -368,7 +433,9 @@ export function createApp() {
   })
 
   app.post('/api/auth/signup', async (request, response) => {
-    const { name, email, password } = request.body
+    const name = normalizeName(request.body.name)
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
 
     if (!name || !email || !password) {
       response.status(400).json({ message: 'Name, email, and password are required.' })
@@ -376,9 +443,11 @@ export function createApp() {
     }
 
     try {
+      validatePassword(password)
+      const passwordHash = await hashPassword(password)
       const result = await run(
         'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-        [name, email, password],
+        [name, email, passwordHash],
       )
       await run(
         `
@@ -389,9 +458,9 @@ export function createApp() {
         [result.lastID],
       )
       const user = await get('SELECT id, name, email FROM users WHERE id = ?', [result.lastID])
-      response.status(201).json(user)
+      response.status(201).json(buildAuthResponse(user))
     } catch (_error) {
-      response.status(400).json({ message: 'That email is already in use.' })
+      response.status(400).json({ message: 'Could not create that account.' })
     }
   })
 
@@ -412,7 +481,9 @@ export function createApp() {
 
   app.patch('/api/me', async (request, response) => {
     const userId = parseUserId(request)
-    const { name, email, password } = request.body
+    const name = normalizeName(request.body.name)
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
 
     const current = await get('SELECT id, name, email, password FROM users WHERE id = ?', [userId])
     if (!current) {
@@ -421,6 +492,9 @@ export function createApp() {
     }
 
     try {
+      const nextPassword = password
+        ? await hashPassword(password)
+        : current.password
       await run(
         `
           UPDATE users
@@ -430,13 +504,13 @@ export function createApp() {
         [
           name || current.name,
           email || current.email,
-          password || current.password,
+          nextPassword,
           userId,
         ],
       )
 
       const updated = await get('SELECT id, name, email FROM users WHERE id = ?', [userId])
-      response.json(updated)
+      response.json(buildAuthResponse(updated))
     } catch (_error) {
       response.status(400).json({ message: 'Could not update that profile.' })
     }
@@ -546,18 +620,32 @@ export function createApp() {
   })
 
   app.post('/api/auth/login', async (request, response) => {
-    const { email, password } = request.body
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
     const user = await get(
-      'SELECT id, name, email FROM users WHERE email = ? AND password = ?',
-      [email, password],
+      'SELECT id, name, email, password FROM users WHERE email = ?',
+      [email],
     )
 
-    if (!user) {
+    if (!user || !(await verifyPassword(password, user.password))) {
       response.status(401).json({ message: 'Invalid email or password.' })
       return
     }
 
-    response.json(user)
+    if (!isPasswordHash(user.password)) {
+      await run(
+        'UPDATE users SET password = ? WHERE id = ?',
+        [await hashPassword(password), user.id],
+      )
+    }
+
+    response.json(
+      buildAuthResponse({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      }),
+    )
   })
 
   app.get('/api/discover', async (request, response) => {
@@ -872,17 +960,19 @@ export function createApp() {
   })
 
   app.patch('/api/grocery-lists/:id/items/:ingredientId', async (request, response) => {
+    const userId = parseUserId(request)
     const { quantity, unit, purchased, note } = request.body
 
-    await run(
+    const updated = await run(
       `
-        UPDATE contains
+        UPDATE contains c
+        JOIN grocery_lists gl ON gl.id = c.grocery_list_id
         SET
-          quantity = COALESCE(?, quantity),
-          unit = COALESCE(?, unit),
-          purchased = COALESCE(?, purchased),
-          note = COALESCE(?, note)
-        WHERE grocery_list_id = ? AND ingredient_id = ?
+          c.quantity = COALESCE(?, c.quantity),
+          c.unit = COALESCE(?, c.unit),
+          c.purchased = COALESCE(?, c.purchased),
+          c.note = COALESCE(?, c.note)
+        WHERE c.grocery_list_id = ? AND c.ingredient_id = ? AND gl.creator_id = ?
       `,
       [
         quantity ?? null,
@@ -891,25 +981,44 @@ export function createApp() {
         note ?? null,
         request.params.id,
         request.params.ingredientId,
+        userId,
       ],
     )
 
+    if (!updated.changes) {
+      response.status(404).json({ message: 'List item not found.' })
+      return
+    }
+
     await run(
-      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [request.params.id],
+      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND creator_id = ?',
+      [request.params.id, userId],
     )
 
     response.json({ message: 'Item updated.' })
   })
 
   app.delete('/api/grocery-lists/:id/items/:ingredientId', async (request, response) => {
-    await run(
-      'DELETE FROM contains WHERE grocery_list_id = ? AND ingredient_id = ?',
-      [request.params.id, request.params.ingredientId],
+    const userId = parseUserId(request)
+
+    const deleted = await run(
+      `
+        DELETE c
+        FROM contains c
+        JOIN grocery_lists gl ON gl.id = c.grocery_list_id
+        WHERE c.grocery_list_id = ? AND c.ingredient_id = ? AND gl.creator_id = ?
+      `,
+      [request.params.id, request.params.ingredientId, userId],
     )
+
+    if (!deleted.changes) {
+      response.status(404).json({ message: 'List item not found.' })
+      return
+    }
+
     await run(
-      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [request.params.id],
+      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND creator_id = ?',
+      [request.params.id, userId],
     )
     response.json({ message: 'Item removed.' })
   })
