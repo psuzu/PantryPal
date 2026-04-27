@@ -533,7 +533,7 @@ export function createApp() {
         return
       }
 
-      response.status(400).json({ message: 'Could not create that account.' })
+      response.status(400).json({ message: 'Password must be at least 8 characters' })
     }
   })
 
@@ -907,26 +907,29 @@ export function createApp() {
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
 
     const rows = await all(
-      `
-        SELECT
-          r.id,
-          r.name,
-          r.category,
-          r.cuisine,
-          r.image_url,
-          r.description,
-          1 AS saved,
-          s.is_favorite,
-          AVG(rr.rating) AS average_rating
-        FROM saves s
-        JOIN recipes r ON r.id = s.recipe_id
-        LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
-        ${where}
-        GROUP BY r.id, r.name, r.category, r.cuisine, r.image_url, r.description, s.is_favorite
-        ORDER BY s.saved_at DESC
-      `,
-      params,
-    )
+    `
+      SELECT
+        r.id,
+        r.name,
+        r.category,
+        r.cuisine,
+        r.image_url,
+        r.description,
+        1 AS saved,
+        s.is_favorite,
+        (
+          SELECT AVG(rating)
+          FROM recipe_reviews rr
+          WHERE rr.recipe_id = r.id
+        ) AS average_rating
+      FROM saves s
+      JOIN recipes r ON r.id = s.recipe_id
+      WHERE s.user_id = ?
+      ${favorites === 'true' ? 'AND s.is_favorite = 1' : ''}
+      ORDER BY s.saved_at DESC
+    `,
+    [userId],
+  )
 
     response.json(
       rows.map((row) => ({
