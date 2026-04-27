@@ -1191,14 +1191,14 @@ function PublicShell({
     <main className="auth-layout">
       <section className="auth-card">
         <p className="eyebrow">{authMode === 'signup' ? 'Create account' : 'Welcome back'}</p>
-        <h2>{authMode === 'signup' ? 'Start building your recipe library.' : 'Log in to your saved recipes.'}</h2>
+        <h2>{authMode === 'signup' ? 'Start Building Your Recipe Library' : 'Login to Your Saved Recipes'}</h2>
         {authMode === 'signup' ? (
           <label>
             Name
             <input
               value={authForm.name}
               onChange={(event) => setAuthForm((current) => ({ ...current, name: event.target.value }))}
-              placeholder="Suzu Paudel"
+              placeholder="Gordan Ramsey"
             />
           </label>
         ) : null}
@@ -1207,9 +1207,8 @@ function PublicShell({
           <input
             value={authForm.email}
             onChange={(event) => setAuthForm((current) => ({ ...current, email: event.target.value }))}
-            placeholder="suzu@pantrypal.app"
+            placeholder="you@example.com"
           />
-          <small>Use the seeded demo account or create your own.</small>
         </label>
         <label>
           Password
@@ -1217,9 +1216,8 @@ function PublicShell({
             type="password"
             value={authForm.password}
             onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))}
-            placeholder="demo1234"
+            placeholder="Enter your password"
           />
-          <small>Demo login: `suzu@pantrypal.app` / `demo1234`</small>
         </label>
         {authMode === 'signup' ? (
           <label>

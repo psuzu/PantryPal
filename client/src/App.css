@@ -290,9 +290,9 @@
 .sidebar-brand-subrow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.65rem;
-  width: calc(100% + 3.9rem);
+  width: calc(100% + 2.9rem);
   margin-left: -3.9rem;
 }
 
@@ -301,7 +301,7 @@
 }
 
 .sidebar-brand-subrow .sidebar-toggle {
-  margin-left: -0.6rem;
+  margin-left: 3.9rem;
 }
 
 .sidebar-brand-copy h1 {

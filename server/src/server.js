@@ -209,6 +209,10 @@ function normalizeReviewInput(review) {
   return String(review || '').trim()
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
 async function ensureIngredient(name, description = '') {
   const existing = await get(
     'SELECT id FROM ingredients WHERE LOWER(name) = LOWER(?)',
@@ -496,6 +500,11 @@ export function createApp() {
       return
     }
 
+    if (!isValidEmail(email)) {
+      response.status(400).json({ message: 'Enter a valid email address.' })
+      return
+    }
+
     try {
       validatePassword(password)
       const passwordHash = await hashPassword(password)
@@ -513,7 +522,17 @@ export function createApp() {
       )
       const user = await get('SELECT id, name, email FROM users WHERE id = ?', [result.lastID])
       response.status(201).json(buildAuthResponse(user))
-    } catch (_error) {
+    } catch (error) {
+      if (error?.code === 'ER_DUP_ENTRY') {
+        response.status(400).json({ message: 'That email is already in use.' })
+        return
+      }
+
+      if (error?.message) {
+        response.status(400).json({ message: error.message })
+        return
+      }
+
       response.status(400).json({ message: 'Could not create that account.' })
     }
   })
