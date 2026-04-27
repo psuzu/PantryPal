@@ -74,4 +74,3 @@ SELECT
   1,
   'warm'
 FROM users;
-
