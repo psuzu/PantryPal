@@ -2,6 +2,14 @@ import cors from 'cors'
 import express from 'express'
 import { fileURLToPath } from 'node:url'
 
+import {
+  buildAuthResponse,
+  hashPassword,
+  isPasswordHash,
+  validatePassword,
+  verifyAuthToken,
+  verifyPassword,
+} from './auth.js'
 import { all, get, initializeDatabase, run } from './db.js'
 import {
   extractIngredients,
@@ -15,9 +23,65 @@ import {
 
 const PORT = process.env.PORT || 3001
 const currentFile = fileURLToPath(import.meta.url)
+const publicApiPaths = new Set([
+  '/auth/login',
+  '/auth/signup',
+  '/health',
+  '/health/db',
+  '/landing-recipes',
+  '/meta',
+])
 
 function parseUserId(request) {
-  return Number(request.header('x-user-id') || request.query.userId || 1)
+  return request.user.id
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase()
+}
+
+function normalizeName(name) {
+  return String(name || '').trim()
+}
+
+function getBearerToken(request) {
+  const authorization = request.header('authorization') || ''
+  if (!authorization.startsWith('Bearer ')) {
+    return null
+  }
+
+  return authorization.slice('Bearer '.length).trim()
+}
+
+async function authenticateApiRequest(request, response, next) {
+  if (request.method === 'OPTIONS' || publicApiPaths.has(request.path)) {
+    next()
+    return
+  }
+
+  const token = getBearerToken(request)
+  if (!token) {
+    response.status(401).json({ message: 'Authentication required.' })
+    return
+  }
+
+  try {
+    const authUser = verifyAuthToken(token)
+    const user = await get(
+      'SELECT id, name, email FROM users WHERE id = ?',
+      [authUser.id],
+    )
+
+    if (!user) {
+      response.status(401).json({ message: 'Authentication required.' })
+      return
+    }
+
+    request.user = user
+    next()
+  } catch (_error) {
+    response.status(401).json({ message: 'Authentication required.' })
+  }
 }
 
 async function getSavedMaps(userId) {
@@ -231,7 +295,7 @@ async function getStoredRecipeDetail(recipeId, userId) {
       LEFT JOIN recipe_notes rn ON rn.recipe_id = r.id AND rn.user_id = ?
       LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
       WHERE r.id = ?
-      GROUP BY r.id, s.user_id, s.is_favorite
+      GROUP BY r.id, r.name, r.category, r.cuisine, r.image_url, r.description, s.user_id, s.is_favorite
     `,
     [userId, userId, recipeId],
   )
@@ -269,7 +333,7 @@ async function buildIngredientPreview(recipeSelections) {
 
     for (const ingredient of ingredients) {
       const multiplier = Number(selection.multiplier || 1)
-      const key = `${ingredient.id}:${ingredient.unit}`
+      const key = String(ingredient.id)
       const existing = consolidated.get(key) || {
         ingredientId: ingredient.id,
         ingredient: ingredient.name,
@@ -312,6 +376,25 @@ export function createApp() {
 
   app.use(cors())
   app.use(express.json())
+  app.use('/api', authenticateApiRequest)
+
+  app.get('/api/health/db', async (_request, response) => {
+    try {
+      const tables = await all('SHOW TABLES')
+      const recipeCount = await get('SELECT COUNT(*) AS recipeCount FROM recipes')
+
+      response.json({
+        ok: true,
+        recipeCount: recipeCount.recipeCount,
+        tables: tables.map((row) => Object.values(row)[0]),
+      })
+    } catch (error) {
+      response.status(500).json({
+        ok: false,
+        message: error.message,
+      })
+    }
+  })
 
   app.get('/api/meta', async (_request, response) => {
     try {
@@ -350,7 +433,9 @@ export function createApp() {
   })
 
   app.post('/api/auth/signup', async (request, response) => {
-    const { name, email, password } = request.body
+    const name = normalizeName(request.body.name)
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
 
     if (!name || !email || !password) {
       response.status(400).json({ message: 'Name, email, and password are required.' })
@@ -358,9 +443,11 @@ export function createApp() {
     }
 
     try {
+      validatePassword(password)
+      const passwordHash = await hashPassword(password)
       const result = await run(
         'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-        [name, email, password],
+        [name, email, passwordHash],
       )
       await run(
         `
@@ -371,9 +458,19 @@ export function createApp() {
         [result.lastID],
       )
       const user = await get('SELECT id, name, email FROM users WHERE id = ?', [result.lastID])
-      response.status(201).json(user)
-    } catch (_error) {
-      response.status(400).json({ message: 'That email is already in use.' })
+      response.status(201).json(buildAuthResponse(user))
+    } catch (error) {
+      if (error?.message === 'Password must be at least 8 characters long.') {
+        response.status(400).json({ message: error.message })
+        return
+      }
+
+      if (error?.code === 'ER_DUP_ENTRY') {
+        response.status(400).json({ message: 'That email is already in use.' })
+        return
+      }
+
+      response.status(400).json({ message: 'Could not create that account.' })
     }
   })
 
@@ -394,7 +491,9 @@ export function createApp() {
 
   app.patch('/api/me', async (request, response) => {
     const userId = parseUserId(request)
-    const { name, email, password } = request.body
+    const name = normalizeName(request.body.name)
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
 
     const current = await get('SELECT id, name, email, password FROM users WHERE id = ?', [userId])
     if (!current) {
@@ -403,6 +502,9 @@ export function createApp() {
     }
 
     try {
+      const nextPassword = password
+        ? await hashPassword(password)
+        : current.password
       await run(
         `
           UPDATE users
@@ -412,13 +514,13 @@ export function createApp() {
         [
           name || current.name,
           email || current.email,
-          password || current.password,
+          nextPassword,
           userId,
         ],
       )
 
       const updated = await get('SELECT id, name, email FROM users WHERE id = ?', [userId])
-      response.json(updated)
+      response.json(buildAuthResponse(updated))
     } catch (_error) {
       response.status(400).json({ message: 'Could not update that profile.' })
     }
@@ -488,12 +590,12 @@ export function createApp() {
         INSERT INTO user_settings (
           user_id, default_list_name, preferred_export_format, show_purchased_in_exports, show_notes_in_exports, accent_mode
         ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          default_list_name = excluded.default_list_name,
-          preferred_export_format = excluded.preferred_export_format,
-          show_purchased_in_exports = excluded.show_purchased_in_exports,
-          show_notes_in_exports = excluded.show_notes_in_exports,
-          accent_mode = excluded.accent_mode
+        ON DUPLICATE KEY UPDATE
+          default_list_name = VALUES(default_list_name),
+          preferred_export_format = VALUES(preferred_export_format),
+          show_purchased_in_exports = VALUES(show_purchased_in_exports),
+          show_notes_in_exports = VALUES(show_notes_in_exports),
+          accent_mode = VALUES(accent_mode)
       `,
       [
         userId,
@@ -528,18 +630,32 @@ export function createApp() {
   })
 
   app.post('/api/auth/login', async (request, response) => {
-    const { email, password } = request.body
+    const email = normalizeEmail(request.body.email)
+    const { password } = request.body
     const user = await get(
-      'SELECT id, name, email FROM users WHERE email = ? AND password = ?',
-      [email, password],
+      'SELECT id, name, email, password FROM users WHERE email = ?',
+      [email],
     )
 
-    if (!user) {
+    if (!user || !(await verifyPassword(password, user.password))) {
       response.status(401).json({ message: 'Invalid email or password.' })
       return
     }
 
-    response.json(user)
+    if (!isPasswordHash(user.password)) {
+      await run(
+        'UPDATE users SET password = ? WHERE id = ?',
+        [await hashPassword(password), user.id],
+      )
+    }
+
+    response.json(
+      buildAuthResponse({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      }),
+    )
   })
 
   app.get('/api/discover', async (request, response) => {
@@ -608,15 +724,15 @@ export function createApp() {
       await ensureRecipeImported(recipeId)
       await run(
         `
-          INSERT INTO saves (user_id, recipe_id, is_favorite)
+          INSERT IGNORE INTO saves (user_id, recipe_id, is_favorite)
           VALUES (?, ?, 0)
-          ON CONFLICT(user_id, recipe_id) DO NOTHING
         `,
         [userId, recipeId],
       )
 
       response.status(201).json({ message: 'Recipe saved.' })
-    } catch (_error) {
+    } catch (error) {
+      console.error('Recipe import failed:', error)
       response.status(502).json({ message: 'Could not import that recipe from TheMealDB.' })
     }
   })
@@ -653,8 +769,8 @@ export function createApp() {
       `
         INSERT INTO recipe_notes (user_id, recipe_id, note)
         VALUES (?, ?, ?)
-        ON CONFLICT(user_id, recipe_id)
-        DO UPDATE SET note = excluded.note
+        ON DUPLICATE KEY UPDATE
+          note = VALUES(note)
       `,
       [userId, request.params.id, note],
     )
@@ -690,7 +806,7 @@ export function createApp() {
         JOIN recipes r ON r.id = s.recipe_id
         LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
         ${where}
-        GROUP BY r.id, s.is_favorite
+        GROUP BY r.id, r.name, r.category, r.cuisine, r.image_url, r.description, s.is_favorite
         ORDER BY s.saved_at DESC
       `,
       params,
@@ -743,6 +859,11 @@ export function createApp() {
         `
           INSERT INTO contains (grocery_list_id, ingredient_id, quantity, unit, purchased, note)
           VALUES (?, ?, ?, ?, 0, '')
+          ON DUPLICATE KEY UPDATE
+            quantity = VALUES(quantity),
+            unit = VALUES(unit),
+            purchased = VALUES(purchased),
+            note = VALUES(note)
         `,
         [created.lastID, item.ingredientId, item.quantity, item.unit],
       )
@@ -758,24 +879,30 @@ export function createApp() {
   app.get('/api/grocery-lists', async (request, response) => {
     const userId = parseUserId(request)
     const { search = '' } = request.query
-    const rows = await all(
-      `
-        SELECT
-          gl.id,
-          gl.name,
-          gl.description,
-          gl.created_at AS createdAt,
-          gl.updated_at AS updatedAt,
-          COUNT(c.ingredient_id) AS itemCount
-        FROM grocery_lists gl
-        LEFT JOIN contains c ON c.grocery_list_id = gl.id
-        WHERE gl.creator_id = ? AND LOWER(gl.name) LIKE ?
-        GROUP BY gl.id
-        ORDER BY gl.updated_at DESC
-      `,
-      [userId, `%${search.toLowerCase()}%`],
-    )
-    response.json(rows)
+    try {
+      const rows = await all(
+        `
+          SELECT
+            gl.id,
+            gl.name,
+            gl.description,
+            gl.created_at AS createdAt,
+            gl.updated_at AS updatedAt,
+            COUNT(c.ingredient_id) AS itemCount
+          FROM grocery_lists gl
+          LEFT JOIN contains c ON c.grocery_list_id = gl.id
+          WHERE gl.creator_id = ? AND LOWER(gl.name) LIKE ?
+          GROUP BY gl.id, gl.name, gl.description, gl.created_at, gl.updated_at
+          ORDER BY gl.updated_at DESC
+        `,
+        [userId, `%${search.toLowerCase()}%`],
+      )
+
+      response.json(rows)
+    } catch (error) {
+      console.error('Load grocery lists failed:', error)
+      response.status(500).json({ message: error.message })
+    }
   })
 
   app.get('/api/grocery-lists/:id', async (request, response) => {
@@ -783,43 +910,48 @@ export function createApp() {
     const uncheckedOnly = request.query.uncheckedOnly === 'true'
     const search = (request.query.search || '').toLowerCase()
 
-    const list = await get(
-      `
-        SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
-        FROM grocery_lists
-        WHERE id = ? AND creator_id = ?
-      `,
-      [request.params.id, userId],
-    )
+    try {
+      const list = await get(
+        `
+          SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
+          FROM grocery_lists
+          WHERE id = ? AND creator_id = ?
+        `,
+        [request.params.id, userId],
+      )
 
-    if (!list) {
-      response.status(404).json({ message: 'Grocery list not found.' })
-      return
+      if (!list) {
+        response.status(404).json({ message: 'Grocery list not found.' })
+        return
+      }
+
+      const items = await all(
+        `
+          SELECT
+            i.id AS ingredientId,
+            i.name AS ingredient,
+            c.quantity,
+            c.unit,
+            c.purchased,
+            c.note
+          FROM contains c
+          JOIN ingredients i ON i.id = c.ingredient_id
+          WHERE c.grocery_list_id = ?
+            AND LOWER(i.name) LIKE ?
+            ${uncheckedOnly ? 'AND c.purchased = 0' : ''}
+          ORDER BY i.name
+        `,
+        [request.params.id, `%${search}%`],
+      )
+
+      response.json({
+        ...list,
+        items,
+      })
+    } catch (error) {
+      console.error('Load grocery list detail failed:', error)
+      response.status(500).json({ message: error.message })
     }
-
-    const items = await all(
-      `
-        SELECT
-          i.id AS ingredientId,
-          i.name AS ingredient,
-          c.quantity,
-          c.unit,
-          c.purchased,
-          c.note
-        FROM contains c
-        JOIN ingredients i ON i.id = c.ingredient_id
-        WHERE c.grocery_list_id = ?
-          AND LOWER(i.name) LIKE ?
-          ${uncheckedOnly ? 'AND c.purchased = 0' : ''}
-        ORDER BY i.name
-      `,
-      [request.params.id, `%${search}%`],
-    )
-
-    response.json({
-      ...list,
-      items,
-    })
   })
 
   app.put('/api/grocery-lists/:id', async (request, response) => {
@@ -838,17 +970,19 @@ export function createApp() {
   })
 
   app.patch('/api/grocery-lists/:id/items/:ingredientId', async (request, response) => {
+    const userId = parseUserId(request)
     const { quantity, unit, purchased, note } = request.body
 
-    await run(
+    const updated = await run(
       `
-        UPDATE contains
+        UPDATE contains c
+        JOIN grocery_lists gl ON gl.id = c.grocery_list_id
         SET
-          quantity = COALESCE(?, quantity),
-          unit = COALESCE(?, unit),
-          purchased = COALESCE(?, purchased),
-          note = COALESCE(?, note)
-        WHERE grocery_list_id = ? AND ingredient_id = ?
+          c.quantity = COALESCE(?, c.quantity),
+          c.unit = COALESCE(?, c.unit),
+          c.purchased = COALESCE(?, c.purchased),
+          c.note = COALESCE(?, c.note)
+        WHERE c.grocery_list_id = ? AND c.ingredient_id = ? AND gl.creator_id = ?
       `,
       [
         quantity ?? null,
@@ -857,36 +991,77 @@ export function createApp() {
         note ?? null,
         request.params.id,
         request.params.ingredientId,
+        userId,
       ],
     )
 
+    if (!updated.changes) {
+      response.status(404).json({ message: 'List item not found.' })
+      return
+    }
+
     await run(
-      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [request.params.id],
+      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND creator_id = ?',
+      [request.params.id, userId],
     )
 
     response.json({ message: 'Item updated.' })
   })
 
   app.delete('/api/grocery-lists/:id/items/:ingredientId', async (request, response) => {
-    await run(
-      'DELETE FROM contains WHERE grocery_list_id = ? AND ingredient_id = ?',
-      [request.params.id, request.params.ingredientId],
+    const userId = parseUserId(request)
+
+    const deleted = await run(
+      `
+        DELETE c
+        FROM contains c
+        JOIN grocery_lists gl ON gl.id = c.grocery_list_id
+        WHERE c.grocery_list_id = ? AND c.ingredient_id = ? AND gl.creator_id = ?
+      `,
+      [request.params.id, request.params.ingredientId, userId],
     )
+
+    if (!deleted.changes) {
+      response.status(404).json({ message: 'List item not found.' })
+      return
+    }
+
     await run(
-      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [request.params.id],
+      'UPDATE grocery_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND creator_id = ?',
+      [request.params.id, userId],
     )
     response.json({ message: 'Item removed.' })
   })
 
   app.delete('/api/grocery-lists/:id', async (request, response) => {
     const userId = parseUserId(request)
-    await run(
-      'DELETE FROM grocery_lists WHERE id = ? AND creator_id = ?',
-      [request.params.id, userId],
-    )
-    response.json({ message: 'List deleted.' })
+
+    try {
+      const list = await get(
+        'SELECT id FROM grocery_lists WHERE id = ? AND creator_id = ?',
+        [request.params.id, userId],
+      )
+
+      if (!list) {
+        response.status(404).json({ message: 'Grocery list not found.' })
+        return
+      }
+
+      await run(
+        'DELETE FROM contains WHERE grocery_list_id = ?',
+        [request.params.id],
+      )
+
+      await run(
+        'DELETE FROM grocery_lists WHERE id = ? AND creator_id = ?',
+        [request.params.id, userId],
+      )
+
+      response.json({ message: 'List deleted.' })
+    } catch (error) {
+      console.error('Delete grocery list failed:', error)
+      response.status(500).json({ message: error.message })
+    }
   })
 
   app.get('/api/grocery-lists/:id/export', async (request, response) => {
