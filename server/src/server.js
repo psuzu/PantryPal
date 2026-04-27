@@ -459,7 +459,17 @@ export function createApp() {
       )
       const user = await get('SELECT id, name, email FROM users WHERE id = ?', [result.lastID])
       response.status(201).json(buildAuthResponse(user))
-    } catch (_error) {
+    } catch (error) {
+      if (error?.message === 'Password must be at least 8 characters long.') {
+        response.status(400).json({ message: error.message })
+        return
+      }
+
+      if (error?.code === 'ER_DUP_ENTRY') {
+        response.status(400).json({ message: 'That email is already in use.' })
+        return
+      }
+
       response.status(400).json({ message: 'Could not create that account.' })
     }
   })
