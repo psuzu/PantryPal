@@ -206,7 +206,7 @@
 
 .dashboard {
   display: grid;
-  grid-template-columns: 16rem 1fr;
+  grid-template-columns: 17rem 1fr;
   min-height: 100vh;
   transition: grid-template-columns 180ms ease;
 }
@@ -275,7 +275,7 @@
 
 .sidebar-brand {
   justify-content: flex-start;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.9rem;
   width: 100%;
 }
@@ -292,7 +292,16 @@
   align-items: center;
   justify-content: space-between;
   gap: 0.65rem;
-  width: 100%;
+  width: calc(100% + 3.9rem);
+  margin-left: -3.9rem;
+}
+
+.sidebar-brand-subrow .eyebrow {
+  text-align: left;
+}
+
+.sidebar-brand-subrow .sidebar-toggle {
+  margin-left: -0.6rem;
 }
 
 .sidebar-brand-copy h1 {
@@ -345,15 +354,16 @@
 }
 
 .brand-badge {
-  width: 3rem;
-  height: 3rem;
-  border-radius: 1rem;
+  width: 2.85rem;
+  height: 2.85rem;
+  border-radius: 0.8rem;
   background: linear-gradient(135deg, #f8bc65, #d07120);
   display: grid;
   place-items: center;
   color: #402100;
   font-weight: 700;
-  transform: translateY(-0.2rem);
+  transform: translateY(-0.35rem);
+  flex: 0 0 auto;
 }
 
 .content {
