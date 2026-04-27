@@ -845,7 +845,7 @@ function App() {
           <section className="content">
             <header className="page-header">
               <div>
-                <p className="eyebrow">PantryPal dashboard</p>
+                <p className="eyebrow">Dashboard</p>
                 <h2>{pageTitle}</h2>
               </div>
               <div className="page-header-actions">
