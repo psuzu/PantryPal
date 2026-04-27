@@ -58,6 +58,22 @@ CREATE TABLE IF NOT EXISTS user_settings (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS recipe_reviews (
+  id INT NOT NULL AUTO_INCREMENT,
+  user_id INT NOT NULL,
+  recipe_id INT NOT NULL,
+  rating TINYINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  review TEXT DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY unique_user_recipe_review (user_id, recipe_id),
+  KEY idx_recipe_reviews_recipe (recipe_id),
+  CONSTRAINT fk_recipe_reviews_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_recipe_reviews_recipe
+    FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+);
+
 INSERT IGNORE INTO user_settings (
   user_id,
   default_list_name,

@@ -140,6 +140,45 @@ async function getRecipeInstructions(recipeId) {
   )
 }
 
+async function getRecipeReviews(recipeId, userId) {
+  const rows = await all(
+    `
+      SELECT
+        rr.id,
+        rr.user_id AS userId,
+        rr.rating,
+        rr.review,
+        rr.created_at AS createdAt,
+        u.name AS userName
+      FROM recipe_reviews rr
+      JOIN users u ON u.id = rr.user_id
+      WHERE rr.recipe_id = ?
+      ORDER BY rr.created_at DESC
+    `,
+    [recipeId],
+  )
+
+  const ownReview = rows.find((row) => row.userId === userId)
+
+  return {
+    reviews: rows.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      userName: row.userName,
+      rating: Number(row.rating),
+      review: row.review || '',
+      createdAt: row.createdAt,
+      mine: row.userId === userId,
+    })),
+    currentUserReview: ownReview
+      ? {
+          rating: Number(ownReview.rating),
+          review: ownReview.review || '',
+        }
+      : null,
+  }
+}
+
 function buildRecipeWhere(search, category, cuisine, savedOnly = false) {
   const clauses = []
   const params = []
@@ -164,6 +203,10 @@ function buildRecipeWhere(search, category, cuisine, savedOnly = false) {
     where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
     params,
   }
+}
+
+function normalizeReviewInput(review) {
+  return String(review || '').trim()
 }
 
 async function ensureIngredient(name, description = '') {
@@ -245,18 +288,21 @@ async function ensureRecipeImported(recipeId) {
 
 async function buildRecipeDetailFromMeal(meal, userId) {
   const recipeId = Number(meal.idMeal)
-  const savedRow = await get(
-    'SELECT is_favorite FROM saves WHERE user_id = ? AND recipe_id = ?',
-    [userId, recipeId],
-  )
-  const noteRow = await get(
-    'SELECT note FROM recipe_notes WHERE user_id = ? AND recipe_id = ?',
-    [userId, recipeId],
-  )
-  const ratingRow = await get(
-    'SELECT AVG(rating) AS average_rating FROM recipe_reviews WHERE recipe_id = ?',
-    [recipeId],
-  )
+  const [savedRow, noteRow, ratingRow, reviewData] = await Promise.all([
+    get(
+      'SELECT is_favorite FROM saves WHERE user_id = ? AND recipe_id = ?',
+      [userId, recipeId],
+    ),
+    get(
+      'SELECT note FROM recipe_notes WHERE user_id = ? AND recipe_id = ?',
+      [userId, recipeId],
+    ),
+    get(
+      'SELECT AVG(rating) AS average_rating, COUNT(*) AS review_count FROM recipe_reviews WHERE recipe_id = ?',
+      [recipeId],
+    ),
+    getRecipeReviews(recipeId, userId),
+  ])
 
   return {
     id: recipeId,
@@ -272,9 +318,12 @@ async function buildRecipeDetailFromMeal(meal, userId) {
     averageRating: ratingRow?.average_rating
       ? Number(ratingRow.average_rating).toFixed(1)
       : null,
+    reviewCount: Number(ratingRow?.review_count || 0),
     note: noteRow?.note || '',
     instructions: extractInstructions(meal),
     ingredients: extractIngredients(meal),
+    reviews: reviewData.reviews,
+    currentUserReview: reviewData.currentUserReview,
   }
 }
 
@@ -291,7 +340,8 @@ async function getStoredRecipeDetail(recipeId, userId) {
         CASE WHEN s.user_id IS NULL THEN 0 ELSE 1 END AS saved,
         COALESCE(s.is_favorite, 0) AS favorite,
         MAX(rn.note) AS note,
-        AVG(rr.rating) AS averageRating
+        AVG(rr.rating) AS averageRating,
+        COUNT(rr.id) AS reviewCount
       FROM recipes r
       LEFT JOIN saves s ON s.recipe_id = r.id AND s.user_id = ?
       LEFT JOIN recipe_notes rn ON rn.recipe_id = r.id AND rn.user_id = ?
@@ -313,9 +363,11 @@ async function getStoredRecipeDetail(recipeId, userId) {
     averageRating: recipe.averageRating
       ? Number(recipe.averageRating).toFixed(1)
       : null,
+    reviewCount: Number(recipe.reviewCount || 0),
     note: recipe.note || '',
     instructions: await getRecipeInstructions(recipeId),
     ingredients: await getRecipeIngredients(recipeId),
+    ...(await getRecipeReviews(recipeId, userId)),
   }
 }
 
@@ -769,6 +821,57 @@ export function createApp() {
       [userId, request.params.id, note],
     )
     response.json({ message: 'Note saved.' })
+  })
+
+  app.put('/api/recipes/:id/review', async (request, response) => {
+    const userId = parseUserId(request)
+    const recipeId = Number(request.params.id)
+    const rating = Number(request.body.rating)
+    const review = normalizeReviewInput(request.body.review)
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      response.status(400).json({ message: 'Rating must be a whole number between 1 and 5.' })
+      return
+    }
+
+    if (review.length > 1000) {
+      response.status(400).json({ message: 'Review must be 1000 characters or fewer.' })
+      return
+    }
+
+    try {
+      await ensureRecipeImported(recipeId)
+      await run(
+        `
+          INSERT INTO recipe_reviews (user_id, recipe_id, rating, review)
+          VALUES (?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            rating = VALUES(rating),
+            review = VALUES(review),
+            created_at = CURRENT_TIMESTAMP
+        `,
+        [userId, recipeId, rating, review || null],
+      )
+
+      const summary = await get(
+        `
+          SELECT AVG(rating) AS averageRating, COUNT(*) AS reviewCount
+          FROM recipe_reviews
+          WHERE recipe_id = ?
+        `,
+        [recipeId],
+      )
+
+      response.json({
+        message: 'Review saved.',
+        averageRating: summary?.averageRating
+          ? Number(summary.averageRating).toFixed(1)
+          : null,
+        reviewCount: Number(summary?.reviewCount || 0),
+      })
+    } catch (_error) {
+      response.status(500).json({ message: 'Could not save that review.' })
+    }
   })
 
   app.get('/api/my-recipes', async (request, response) => {
