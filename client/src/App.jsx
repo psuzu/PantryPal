@@ -1,12 +1,32 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const api = async (path, options = {}, userId = 1) => {
+const getStoredUser = () => {
+  const stored = window.localStorage.getItem('pantrypal-user')
+  if (!stored) {
+    return null
+  }
+
+  try {
+    const user = JSON.parse(stored)
+    return user?.id ? user : null
+  } catch {
+    return null
+  }
+}
+
+const api = async (path, options = {}, authUser = null) => {
+  const storedUser = getStoredUser()
+  const activeUser = typeof authUser === 'object' && authUser !== null ? authUser : storedUser
+  const userId = typeof authUser === 'number' ? authUser : activeUser?.id
+  const token = activeUser?.token || storedUser?.token
+
   const response = await fetch(path, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
-      'x-user-id': String(userId),
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(userId ? { 'x-user-id': String(userId) } : {}),
       ...(options.headers || {}),
     },
   })
@@ -50,8 +70,7 @@ const normalizeQuantity = (value) => {
 
 function App() {
   const [user, setUser] = useState(() => {
-    const stored = window.localStorage.getItem('pantrypal-user')
-    return stored ? JSON.parse(stored) : null
+    return getStoredUser()
   })
   const [route, setRoute] = useState(user ? { page: 'discover' } : { page: 'landing' })
   const [meta, setMeta] = useState({ categories: ['All'], cuisines: ['All'] })
@@ -532,7 +551,11 @@ function App() {
         },
         user.id,
       )
-      setUser(updatedUser)
+      setUser((current) => ({
+        ...current,
+        ...updatedUser,
+        token: updatedUser.token || current?.token,
+      }))
       setProfileForm((current) => ({ ...current, password: '', confirmPassword: '' }))
       setMessage('Profile updated.')
     } catch (error) {
@@ -612,7 +635,10 @@ function App() {
         includeNotes: String(includeNotes),
       })
       const response = await fetch(`/api/grocery-lists/${route.id}/export?${query.toString()}`, {
-        headers: { 'x-user-id': String(user.id) },
+        headers: {
+          ...(user.token ? { Authorization: `Bearer ${user.token}` } : {}),
+          'x-user-id': String(user.id),
+        },
       })
       if (!response.ok) {
         throw new Error('Could not export the list.')
