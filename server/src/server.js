@@ -231,7 +231,7 @@ async function getStoredRecipeDetail(recipeId, userId) {
       LEFT JOIN recipe_notes rn ON rn.recipe_id = r.id AND rn.user_id = ?
       LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
       WHERE r.id = ?
-      GROUP BY r.id, s.user_id, s.is_favorite
+      GROUP BY r.id, r.name, r.category, r.cuisine, r.image_url, r.description, s.user_id, s.is_favorite
     `,
     [userId, userId, recipeId],
   )
@@ -269,7 +269,7 @@ async function buildIngredientPreview(recipeSelections) {
 
     for (const ingredient of ingredients) {
       const multiplier = Number(selection.multiplier || 1)
-      const key = `${ingredient.id}:${ingredient.unit}`
+      const key = String(ingredient.id)
       const existing = consolidated.get(key) || {
         ingredientId: ingredient.id,
         ingredient: ingredient.name,
@@ -506,12 +506,12 @@ export function createApp() {
         INSERT INTO user_settings (
           user_id, default_list_name, preferred_export_format, show_purchased_in_exports, show_notes_in_exports, accent_mode
         ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          default_list_name = excluded.default_list_name,
-          preferred_export_format = excluded.preferred_export_format,
-          show_purchased_in_exports = excluded.show_purchased_in_exports,
-          show_notes_in_exports = excluded.show_notes_in_exports,
-          accent_mode = excluded.accent_mode
+        ON DUPLICATE KEY UPDATE
+          default_list_name = VALUES(default_list_name),
+          preferred_export_format = VALUES(preferred_export_format),
+          show_purchased_in_exports = VALUES(show_purchased_in_exports),
+          show_notes_in_exports = VALUES(show_notes_in_exports),
+          accent_mode = VALUES(accent_mode)
       `,
       [
         userId,
@@ -626,15 +626,15 @@ export function createApp() {
       await ensureRecipeImported(recipeId)
       await run(
         `
-          INSERT INTO saves (user_id, recipe_id, is_favorite)
+          INSERT IGNORE INTO saves (user_id, recipe_id, is_favorite)
           VALUES (?, ?, 0)
-          ON CONFLICT(user_id, recipe_id) DO NOTHING
         `,
         [userId, recipeId],
       )
 
       response.status(201).json({ message: 'Recipe saved.' })
-    } catch (_error) {
+    } catch (error) {
+      console.error('Recipe import failed:', error)
       response.status(502).json({ message: 'Could not import that recipe from TheMealDB.' })
     }
   })
@@ -671,8 +671,8 @@ export function createApp() {
       `
         INSERT INTO recipe_notes (user_id, recipe_id, note)
         VALUES (?, ?, ?)
-        ON CONFLICT(user_id, recipe_id)
-        DO UPDATE SET note = excluded.note
+        ON DUPLICATE KEY UPDATE
+          note = VALUES(note)
       `,
       [userId, request.params.id, note],
     )
@@ -708,7 +708,7 @@ export function createApp() {
         JOIN recipes r ON r.id = s.recipe_id
         LEFT JOIN recipe_reviews rr ON rr.recipe_id = r.id
         ${where}
-        GROUP BY r.id, s.is_favorite
+        GROUP BY r.id, r.name, r.category, r.cuisine, r.image_url, r.description, s.is_favorite
         ORDER BY s.saved_at DESC
       `,
       params,
@@ -761,6 +761,11 @@ export function createApp() {
         `
           INSERT INTO contains (grocery_list_id, ingredient_id, quantity, unit, purchased, note)
           VALUES (?, ?, ?, ?, 0, '')
+          ON DUPLICATE KEY UPDATE
+            quantity = VALUES(quantity),
+            unit = VALUES(unit),
+            purchased = VALUES(purchased),
+            note = VALUES(note)
         `,
         [created.lastID, item.ingredientId, item.quantity, item.unit],
       )
@@ -776,24 +781,30 @@ export function createApp() {
   app.get('/api/grocery-lists', async (request, response) => {
     const userId = parseUserId(request)
     const { search = '' } = request.query
-    const rows = await all(
-      `
-        SELECT
-          gl.id,
-          gl.name,
-          gl.description,
-          gl.created_at AS createdAt,
-          gl.updated_at AS updatedAt,
-          COUNT(c.ingredient_id) AS itemCount
-        FROM grocery_lists gl
-        LEFT JOIN contains c ON c.grocery_list_id = gl.id
-        WHERE gl.creator_id = ? AND LOWER(gl.name) LIKE ?
-        GROUP BY gl.id
-        ORDER BY gl.updated_at DESC
-      `,
-      [userId, `%${search.toLowerCase()}%`],
-    )
-    response.json(rows)
+    try {
+      const rows = await all(
+        `
+          SELECT
+            gl.id,
+            gl.name,
+            gl.description,
+            gl.created_at AS createdAt,
+            gl.updated_at AS updatedAt,
+            COUNT(c.ingredient_id) AS itemCount
+          FROM grocery_lists gl
+          LEFT JOIN contains c ON c.grocery_list_id = gl.id
+          WHERE gl.creator_id = ? AND LOWER(gl.name) LIKE ?
+          GROUP BY gl.id, gl.name, gl.description, gl.created_at, gl.updated_at
+          ORDER BY gl.updated_at DESC
+        `,
+        [userId, `%${search.toLowerCase()}%`],
+      )
+
+      response.json(rows)
+    } catch (error) {
+      console.error('Load grocery lists failed:', error)
+      response.status(500).json({ message: error.message })
+    }
   })
 
   app.get('/api/grocery-lists/:id', async (request, response) => {
@@ -801,43 +812,48 @@ export function createApp() {
     const uncheckedOnly = request.query.uncheckedOnly === 'true'
     const search = (request.query.search || '').toLowerCase()
 
-    const list = await get(
-      `
-        SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
-        FROM grocery_lists
-        WHERE id = ? AND creator_id = ?
-      `,
-      [request.params.id, userId],
-    )
+    try {
+      const list = await get(
+        `
+          SELECT id, name, description, created_at AS createdAt, updated_at AS updatedAt
+          FROM grocery_lists
+          WHERE id = ? AND creator_id = ?
+        `,
+        [request.params.id, userId],
+      )
 
-    if (!list) {
-      response.status(404).json({ message: 'Grocery list not found.' })
-      return
+      if (!list) {
+        response.status(404).json({ message: 'Grocery list not found.' })
+        return
+      }
+
+      const items = await all(
+        `
+          SELECT
+            i.id AS ingredientId,
+            i.name AS ingredient,
+            c.quantity,
+            c.unit,
+            c.purchased,
+            c.note
+          FROM contains c
+          JOIN ingredients i ON i.id = c.ingredient_id
+          WHERE c.grocery_list_id = ?
+            AND LOWER(i.name) LIKE ?
+            ${uncheckedOnly ? 'AND c.purchased = 0' : ''}
+          ORDER BY i.name
+        `,
+        [request.params.id, `%${search}%`],
+      )
+
+      response.json({
+        ...list,
+        items,
+      })
+    } catch (error) {
+      console.error('Load grocery list detail failed:', error)
+      response.status(500).json({ message: error.message })
     }
-
-    const items = await all(
-      `
-        SELECT
-          i.id AS ingredientId,
-          i.name AS ingredient,
-          c.quantity,
-          c.unit,
-          c.purchased,
-          c.note
-        FROM contains c
-        JOIN ingredients i ON i.id = c.ingredient_id
-        WHERE c.grocery_list_id = ?
-          AND LOWER(i.name) LIKE ?
-          ${uncheckedOnly ? 'AND c.purchased = 0' : ''}
-        ORDER BY i.name
-      `,
-      [request.params.id, `%${search}%`],
-    )
-
-    response.json({
-      ...list,
-      items,
-    })
   })
 
   app.put('/api/grocery-lists/:id', async (request, response) => {
@@ -900,11 +916,33 @@ export function createApp() {
 
   app.delete('/api/grocery-lists/:id', async (request, response) => {
     const userId = parseUserId(request)
-    await run(
-      'DELETE FROM grocery_lists WHERE id = ? AND creator_id = ?',
-      [request.params.id, userId],
-    )
-    response.json({ message: 'List deleted.' })
+
+    try {
+      const list = await get(
+        'SELECT id FROM grocery_lists WHERE id = ? AND creator_id = ?',
+        [request.params.id, userId],
+      )
+
+      if (!list) {
+        response.status(404).json({ message: 'Grocery list not found.' })
+        return
+      }
+
+      await run(
+        'DELETE FROM contains WHERE grocery_list_id = ?',
+        [request.params.id],
+      )
+
+      await run(
+        'DELETE FROM grocery_lists WHERE id = ? AND creator_id = ?',
+        [request.params.id, userId],
+      )
+
+      response.json({ message: 'List deleted.' })
+    } catch (error) {
+      console.error('Delete grocery list failed:', error)
+      response.status(500).json({ message: error.message })
+    }
   })
 
   app.get('/api/grocery-lists/:id/export', async (request, response) => {

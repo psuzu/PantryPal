@@ -78,7 +78,7 @@ function App() {
   const [listDetail, setListDetail] = useState(null)
   const [listFilters, setListFilters] = useState({ search: '', uncheckedOnly: false })
   const [listLoading, setListLoading] = useState(false)
-  const [builderName, setBuilderName] = useState('Weekend Prep')
+  const [builderName, setBuilderName] = useState('')
   const [builderDescription, setBuilderDescription] = useState('Consolidated ingredients for the next few meals')
   const [builderSelections, setBuilderSelections] = useState([])
   const [builderPreview, setBuilderPreview] = useState({
@@ -150,7 +150,7 @@ function App() {
     api('/api/me/settings', {}, user.id)
       .then((data) => {
         setSettingsForm(data)
-        setBuilderName((current) => current || data.defaultListName || 'Weekly Groceries')
+        setBuilderName(data.defaultListName || 'Weekly Groceries')
       })
       .catch((error) => setMessage(error.message))
   }, [user])
@@ -555,9 +555,7 @@ function App() {
         user.id,
       )
       setSettingsForm(updatedSettings)
-      if (!builderName || builderName === initialSettingsForm.defaultListName) {
-        setBuilderName(updatedSettings.defaultListName)
-      }
+      setBuilderName(updatedSettings.defaultListName || 'Weekly Groceries')
       setMessage('Settings updated.')
     } catch (error) {
       setMessage(error.message)
@@ -957,6 +955,7 @@ function App() {
 
       {modal?.type === 'export' ? (
         <ExportModal
+          settings={settingsForm}
           onClose={() => setModal(null)}
           onExport={handleExport}
         />
@@ -1827,10 +1826,14 @@ function ConfirmModal({ title, description, confirmLabel, tone, onClose, onConfi
   )
 }
 
-function ExportModal({ onClose, onExport }) {
-  const [format, setFormat] = useState('csv')
-  const [includePurchased, setIncludePurchased] = useState(true)
-  const [includeNotes, setIncludeNotes] = useState(true)
+function ExportModal({ settings, onClose, onExport }) {
+  const [format, setFormat] = useState(settings?.preferredExportFormat || 'csv')
+  const [includePurchased, setIncludePurchased] = useState(
+    settings?.showPurchasedInExports ?? true,
+  )
+  const [includeNotes, setIncludeNotes] = useState(
+    settings?.showNotesInExports ?? true,
+  )
 
   return (
     <div className="modal-backdrop">
