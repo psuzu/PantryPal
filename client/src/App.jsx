@@ -86,6 +86,12 @@ const formatReviewCountLabel = (count) => `${count} review${count === 1 ? '' : '
 const formatUsDate = (value) => new Date(value).toLocaleDateString('en-US')
 const formatUsDateTime = (value) => new Date(value).toLocaleString('en-US')
 
+const mergeBuilderSelections = (recipes, currentSelections) =>
+  recipes.map((recipe) => {
+    const existing = currentSelections.find((item) => item.recipeId === recipe.id)
+    return existing || { recipeId: recipe.id, name: recipe.name, multiplier: 1, checked: false }
+  })
+
 function App() {
   const [user, setUser] = useState(() => {
     return getStoredUser()
@@ -140,6 +146,11 @@ function App() {
   const deferredSavedSearch = useDeferredValue(myRecipeFilters.search)
   const deferredListSearch = useDeferredValue(listsSearch)
   const deferredIngredientSearch = useDeferredValue(listFilters.search)
+
+  const syncSavedRecipes = (recipes) => {
+    setSavedRecipes(recipes)
+    setBuilderSelections((current) => mergeBuilderSelections(recipes, current))
+  }
 
   useEffect(() => {
     if (user) {
@@ -224,14 +235,7 @@ function App() {
 
     api(`/api/my-recipes?${query.toString()}`, {}, user.id)
       .then((data) => {
-        setSavedRecipes(data)
-        setBuilderSelections((current) => {
-          const next = data.map((recipe) => {
-            const existing = current.find((item) => item.recipeId === recipe.id)
-            return existing || { recipeId: recipe.id, name: recipe.name, multiplier: 1, checked: false }
-          })
-          return next
-        })
+        syncSavedRecipes(data)
       })
       .catch((error) => setMessage(error.message))
       .finally(() => setSavedLoading(false))
@@ -441,7 +445,7 @@ function App() {
         setRecipeDetail({ ...recipeDetail, saved: true })
       }
       const data = await api('/api/my-recipes?search=&category=All&cuisine=All&favorites=false', {}, user.id)
-      setSavedRecipes(data)
+      syncSavedRecipes(data)
     } catch (error) {
       setMessage(error.message)
     }
@@ -461,7 +465,7 @@ function App() {
         ),
       )
       const data = await api('/api/my-recipes?search=&category=All&cuisine=All&favorites=false', {}, user.id)
-      setSavedRecipes(data)
+      syncSavedRecipes(data)
       if (recipeDetail?.id === recipeId) {
         if (route.page === 'saved-detail') {
           setRoute({ page: 'my-recipes' })
